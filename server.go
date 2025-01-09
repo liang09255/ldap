@@ -45,7 +45,6 @@ type Closer interface {
 	Close(boundDN string, conn net.Conn) error
 }
 
-//
 type Server struct {
 	BindFns     map[string]Binder
 	SearchFns   map[string]Searcher
@@ -78,7 +77,6 @@ type ServerSearchResult struct {
 	ResultCode LDAPResultCode
 }
 
-//
 func NewServer() *Server {
 	s := new(Server)
 	s.Quit = make(chan bool)
@@ -221,7 +219,6 @@ listener:
 	return nil
 }
 
-//
 func (server *Server) handleConnection(conn net.Conn) {
 	boundDN := "" // "" == anonymous
 
@@ -290,16 +287,17 @@ handler:
 			}
 		case ApplicationSearchRequest:
 			server.Stats.countSearches(1)
-			if err := HandleSearchRequest(req, &controls, messageID, boundDN, server, conn); err != nil {
+			cs, err := HandleSearchRequest(req, &controls, messageID, boundDN, server, conn)
+			if err != nil {
 				log.Printf("handleSearchRequest error %s", err.Error()) // TODO: make this more testable/better err handling - stop using log, stop using breaks?
 				e := err.(*Error)
-				if err = sendPacket(conn, encodeSearchDone(messageID, e.ResultCode)); err != nil {
+				if err = sendPacket(conn, encodeSearchDone(messageID, e.ResultCode, nil)); err != nil {
 					log.Printf("sendPacket error %s", err.Error())
 					break handler
 				}
 				break handler
 			} else {
-				if err = sendPacket(conn, encodeSearchDone(messageID, LDAPResultSuccess)); err != nil {
+				if err = sendPacket(conn, encodeSearchDone(messageID, LDAPResultSuccess, cs)); err != nil {
 					log.Printf("sendPacket error %s", err.Error())
 					break handler
 				}
@@ -363,7 +361,6 @@ handler:
 	conn.Close()
 }
 
-//
 func sendPacket(conn net.Conn, packet *ber.Packet) error {
 	_, err := conn.Write(packet.Bytes())
 	if err != nil {
@@ -373,14 +370,13 @@ func sendPacket(conn net.Conn, packet *ber.Packet) error {
 	return nil
 }
 
-//
 func routeFunc(dn string, funcNames []string) string {
 	bestPick := ""
 	bestPickWeight := 0
 	dnMatch := "," + strings.ToLower(dn)
 	var weight int
 	for _, fn := range funcNames {
-		if strings.HasSuffix(dnMatch, "," + fn) {
+		if strings.HasSuffix(dnMatch, ","+fn) {
 			//  empty string as 0, no-comma string 1 , etc
 			if fn == "" {
 				weight = 0
@@ -396,7 +392,6 @@ func routeFunc(dn string, funcNames []string) string {
 	return bestPick
 }
 
-//
 func encodeLDAPResponse(messageID uint64, responseType uint8, ldapResultCode LDAPResultCode, message string) *ber.Packet {
 	responsePacket := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Response")
 	responsePacket.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "Message ID"))
@@ -408,7 +403,6 @@ func encodeLDAPResponse(messageID uint64, responseType uint8, ldapResultCode LDA
 	return responsePacket
 }
 
-//
 type defaultHandler struct {
 }
 
@@ -447,7 +441,6 @@ func (h defaultHandler) Close(boundDN string, conn net.Conn) error {
 	return nil
 }
 
-//
 func (stats *Stats) countConns(delta int) {
 	if stats != nil {
 		stats.statsMutex.Lock()

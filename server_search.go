@@ -9,7 +9,7 @@ import (
 	ber "github.com/nmcclain/asn1-ber"
 )
 
-func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64, boundDN string, server *Server, conn net.Conn) (resultErr error) {
+func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64, boundDN string, server *Server, conn net.Conn) (cs *[]Control, resultErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			resultErr = NewError(LDAPResultOperationsError, fmt.Errorf("Search function panic: %s", r))
@@ -18,12 +18,12 @@ func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64,
 
 	searchReq, err := parseSearchRequest(boundDN, req, controls)
 	if err != nil {
-		return NewError(LDAPResultOperationsError, err)
+		return nil, NewError(LDAPResultOperationsError, err)
 	}
 
 	filterPacket, err := CompileFilter(searchReq.Filter)
 	if err != nil {
-		return NewError(LDAPResultOperationsError, err)
+		return nil, NewError(LDAPResultOperationsError, err)
 	}
 
 	fnNames := []string{}
@@ -33,7 +33,7 @@ func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64,
 	fn := routeFunc(searchReq.BaseDN, fnNames)
 	searchResp, err := server.SearchFns[fn].Search(boundDN, searchReq, conn)
 	if err != nil {
-		return NewError(searchResp.ResultCode, err)
+		return nil, NewError(searchResp.ResultCode, err)
 	}
 
 	if server.EnforceLDAP {
@@ -52,7 +52,7 @@ func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64,
 			// filter
 			keep, resultCode := ServerApplyFilter(filterPacket, entry)
 			if resultCode != LDAPResultSuccess {
-				return NewError(resultCode, errors.New("ServerApplyFilter error"))
+				return nil, NewError(resultCode, errors.New("ServerApplyFilter error"))
 			}
 			if !keep {
 				continue
@@ -79,7 +79,7 @@ func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64,
 			// filter attributes
 			entry, err = filterAttributes(entry, searchReq.Attributes)
 			if err != nil {
-				return NewError(LDAPResultOperationsError, err)
+				return nil, NewError(LDAPResultOperationsError, err)
 			}
 
 			// size limit
@@ -92,13 +92,13 @@ func HandleSearchRequest(req *ber.Packet, controls *[]Control, messageID uint64,
 		// respond
 		responsePacket := encodeSearchResponse(messageID, searchReq, entry)
 		if err = sendPacket(conn, responsePacket); err != nil {
-			return NewError(LDAPResultOperationsError, err)
+			return nil, NewError(LDAPResultOperationsError, err)
 		}
 	}
-	return nil
+	return &searchResp.Controls, nil
 }
 
-/////////////////////////
+// ///////////////////////
 func parseSearchRequest(boundDN string, req *ber.Packet, controls *[]Control) (SearchRequest, error) {
 	if len(req.Children) != 8 {
 		return SearchRequest{}, NewError(LDAPResultOperationsError, errors.New("Bad search request"))
@@ -155,7 +155,7 @@ func parseSearchRequest(boundDN string, req *ber.Packet, controls *[]Control) (S
 	return searchReq, nil
 }
 
-/////////////////////////
+// ///////////////////////
 func filterAttributes(entry *Entry, attributes []string) (*Entry, error) {
 	// only return requested attributes
 	newAttributes := []*EntryAttribute{}
@@ -193,7 +193,7 @@ func filterAttributes(entry *Entry, attributes []string) (*Entry, error) {
 	return entry, nil
 }
 
-/////////////////////////
+// ///////////////////////
 func encodeSearchResponse(messageID uint64, req SearchRequest, res *Entry) *ber.Packet {
 	responsePacket := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Response")
 	responsePacket.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "Message ID"))
@@ -226,7 +226,7 @@ func encodeSearchAttribute(name string, values []string) *ber.Packet {
 	return packet
 }
 
-func encodeSearchDone(messageID uint64, ldapResultCode LDAPResultCode) *ber.Packet {
+func encodeSearchDone(messageID uint64, ldapResultCode LDAPResultCode, cs *[]Control) *ber.Packet {
 	responsePacket := ber.Encode(ber.ClassUniversal, ber.TypeConstructed, ber.TagSequence, nil, "LDAP Response")
 	responsePacket.AppendChild(ber.NewInteger(ber.ClassUniversal, ber.TypePrimitive, ber.TagInteger, messageID, "Message ID"))
 	donePacket := ber.Encode(ber.ClassApplication, ber.TypeConstructed, ApplicationSearchResultDone, nil, "Search result done")
@@ -234,6 +234,16 @@ func encodeSearchDone(messageID uint64, ldapResultCode LDAPResultCode) *ber.Pack
 	donePacket.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "matchedDN: "))
 	donePacket.AppendChild(ber.NewString(ber.ClassUniversal, ber.TypePrimitive, ber.TagOctetString, "", "errorMessage: "))
 	responsePacket.AppendChild(donePacket)
+
+	if cs != nil && len(*cs) > 0 {
+		controlsPacket := ber.Encode(ber.ClassContext, ber.TypeConstructed, 0, nil, "Controls")
+		for _, control := range *cs {
+			// 使用库提供的 Encode 方法将 Control 编码为 BER Packet
+			controlPacket := control.Encode()
+			controlsPacket.AppendChild(controlPacket)
+		}
+		responsePacket.AppendChild(controlsPacket)
+	}
 
 	return responsePacket
 }
